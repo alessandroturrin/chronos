@@ -407,6 +407,8 @@ class ChronosPipeline(BaseChronosPipeline):
 
         return context
 
+        return token_ids
+    
     @torch.no_grad()
     def embed(
         self, context: Union[torch.Tensor, List[torch.Tensor]]

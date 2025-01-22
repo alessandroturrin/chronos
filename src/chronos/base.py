@@ -48,6 +48,14 @@ class BaseChronosPipeline(metaclass=PipelineRegistry):
         # for easy access to the inner HF-style model
         self.inner_model = inner_model
 
+    def get_token_ids(self, context: Union[torch.Tensor, List[torch.Tensor]]) -> torch.Tensor:
+        context_tensor = self._prepare_and_validate_context(context=context)
+        token_ids, _, _ = (
+            self.tokenizer.context_input_transform(context_tensor)
+        )
+
+        return token_ids
+        
     def _prepare_and_validate_context(
         self, context: Union[torch.Tensor, List[torch.Tensor]]
     ):
