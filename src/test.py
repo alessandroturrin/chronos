@@ -16,8 +16,8 @@ df['Month'] = df['Month'].apply(lambda x: int(x.split('-')[1]))
 df[f'lag_{12}'] = df['#Passengers'].shift(12)
 df = df.dropna()
 
-train = df[:-12]
-test = df[-12:]
+train = df[:96]
+test = df[96:108]
 features = ['Month', 'lag_12']
 X_train, y_train = train[features], train['#Passengers']
 X_test, y_test = test[features], test['#Passengers']
