@@ -1,28 +1,34 @@
 from typing import Union, List, Tuple, Any
+from argparse import ArgumentParser
+import os
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 
+import joblib
 import torch
 
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.metrics import accuracy_score
 
 from ext.anomaly_datasets import generate_time_series
+from ext.metrics import Metrics, flatten_metrics
 from chronos.chronos import ChronosPipeline, ChronosTokenizer, ChronosModel, ChronosConfig, AutoConfig, AutoModelForSeq2SeqLM, AutoModelForCausalLM
 
+"""
+Chronos-based pipeline for time series anomaly detection
+"""
 class ChronosTSAD(ChronosPipeline):
 
     tokenizer: ChronosTokenizer
     model: ChronosModel
     classifier: SVC
 
-    def __init__(self, tokenizer, model):
-        #super().__init__(inner_model=model.model)
+    def __init__(self, tokenizer, model, clf):
         self.tokenizer = tokenizer
         self.model = model
+        self.clf = clf
 
     @torch.no_grad()
     def embed(
@@ -46,8 +52,6 @@ class ChronosTSAD(ChronosPipeline):
         batch_size: int = 32
     ) -> None:
         
-        self.clf = SVC()
-
         embeddings = []
 
         for i in range(0, context.shape[0], batch_size):
@@ -79,6 +83,12 @@ class ChronosTSAD(ChronosPipeline):
 
         return predictions
     
+    def load(self, path: str):
+        self.clf = joblib.load(path + '/chronos_tsad.pkl')
+    
+    def save(self, path: str):
+        joblib.dump(self.clf, path + '/chronos_tsad.pkl')
+    
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
         '''
@@ -102,48 +112,236 @@ class ChronosTSAD(ChronosPipeline):
         return cls(
             tokenizer=chronos_config.create_tokenizer(),
             model=ChronosModel(config=chronos_config, model=inner_model),
+            clf=SVC()
         )
 
-clf = ChronosTSAD.from_pretrained(
-    'amazon/chronos-t5-small',
-    device_map="cpu",  
-    torch_dtype=torch.float16,
-)
 
-for _ in range(15):
-    data = generate_time_series(10, 200)
-    df = pd.DataFrame(data)
+"""
+Main
+"""
+if __name__=='__main__':
+    
+    parser = ArgumentParser()
 
-    train, test = df.iloc[:800], df.iloc[800:]
+    parser.add_argument(
+        '--model',
+        help = 'select pre-trained chronos model',
+        required = False,
+        default = 'amazon/chronos-t5-small',
+        choices = ['amazon/chronos-t5-tiny', 'amazon/chronos-t5-small', 'amazon/chronos-t5-base', 'amazon/chronos-t5-large'],
+        type = str
+    )
 
-    X_train, X_test, y_train, y_test = train['target'], test['target'], train['anomaly'], test['anomaly']
+    parser.add_argument(
+        '--execution_mode',
+        help = 'set execution mode',
+        required = False,
+        default = 'zero_shot',
+        choices = ['zero_shot', 'in_context'],
+        type = str
+    )
 
-    clf.fit(torch.tensor(np.array(X_train)), torch.tensor(y_train))
-    y_pred = clf.predict(torch.tensor(np.array(X_test)))
+    parser.add_argument(
+        '--n_datasets',
+        help = 'number of datasets to be generated',
+        required = False,
+        default = 5,
+        type = int
+    )
 
-    score = accuracy_score(y_test, y_pred)
-    print(score)
+    parser.add_argument(
+        '--max_kernels',
+        help = 'number of maximum kernels for data generation',
+        required = False,
+        default = 10,
+        type = int
+    )
 
-print()
+    parser.add_argument(
+        '--max_anomalies',
+        help = 'number of maximum anomalies per dataset',
+        required = False,
+        default = 200,
+        type = int
+    )
 
-for _ in range(15):
-    data = generate_time_series(10, 200)
-    df = pd.DataFrame(data)
+    parser.add_argument(
+        '--train_size',
+        help = 'index to split dataset',
+        required = False,
+        default = .8,
+        type = float
+    )
 
-    train, test = df.iloc[:800], df.iloc[800:]
+    parser.add_argument(
+        '--train_first',
+        help = 'whether to train the model before few shot or not',
+        required = False,
+        default = True,
+        type = bool
+    )
 
-    X_train, X_test, y_train, y_test = train['target'], test['target'], train['anomaly'], test['anomaly']
+    parser.add_argument(
+        '--n_datasets_train',
+        help = 'number of datasets to train the model',
+        required = False,
+        default = 30,
+        type = int
+    )
 
-    #clf.fit(torch.tensor(np.array(X_train)), torch.tensor(y_train))
-    y_pred = clf.predict(torch.tensor(np.array(X_test)))
+    parser.add_argument(
+        '--model_dir',
+        help = 'dir to save/load the model',
+        required = False,
+        default = '[ChronosTSAD]model',
+        type = str
+    )
 
-    score = accuracy_score(y_test, y_pred)
-    print(score)
+    parser.add_argument(
+        '--save',
+        help = 'flag to save the model',
+        required = False,
+        default = True,
+        type = bool
+    )
 
-    clf2 = IsolationForest()
-    clf2.fit(torch.tensor(np.array(X_test).reshape((-1,1))))
-    y_pred = clf2.predict(torch.tensor(np.array(X_test).reshape((-1,1))))
-    y_pred[y_pred==1] = 0
-    y_pred[y_pred==-1] = 1
-    score = accuracy_score(y_test, y_pred)
-    print(score)
+    # parse arguments
+    args = parser.parse_args()
+
+    chronos_model = args.model
+    execution_mode = args.execution_mode
+    n_datasets = args.n_datasets
+    max_kernels = args.max_kernels
+    max_anomalies = args.max_anomalies
+    train_size = args.train_size
+    train_first = args.train_first
+    n_datasets_train = args.n_datasets_train
+    model_dir = args.model_dir
+    save = args.save
+
+
+    # initialize anomaly detector
+    tsad = ChronosTSAD.from_pretrained(
+        chronos_model,
+        device_map="cpu",  
+        torch_dtype=torch.float16,
+    )
+
+    models = {
+        'ChronosTSAD': tsad,
+        'random_forest': RandomForestClassifier,
+        'SVC': SVC,
+    }
+
+    # init results
+    results = dict()
+
+    for model_name in models.keys():
+            results[model_name] = Metrics(model_name)
+
+
+    # IN-CONTEXT EXECUTION
+    if execution_mode=='in_context':
+
+        for _ in tqdm(range(n_datasets), desc='in-context'):
+            
+            for model_name, model in models.items():
+                
+                data = generate_time_series(max_kernels, max_anomalies)
+                df = pd.DataFrame(data)
+
+                # split train and test
+                idx = int(len(df)*train_size)
+                train, test = df.iloc[:idx], df.iloc[idx:]
+                X_train, X_test, y_train, y_test = train['target'], test['target'], train['anomaly'], test['anomaly']
+
+
+                if model_name!='ChronosTSAD':
+                    clf = model()
+                else:
+                    clf = ChronosTSAD.from_pretrained(
+                        chronos_model,
+                        device_map="cpu",  
+                        torch_dtype=torch.float16,
+                    )
+
+
+                if model_name=='ChronosTSAD':
+                    clf.fit(torch.tensor(np.array(X_train)), torch.tensor(y_train))
+                    y_pred = clf.predict(torch.tensor(np.array(X_test)))
+                    results[model_name].add_results(y_test, y_pred)
+                else:
+                    clf.fit(np.array(X_train).reshape(-1,1), y_train)
+                    y_pred = clf.predict(np.array(X_test).reshape(-1,1))
+                    results[model_name].add_results(y_test, y_pred)
+        
+        
+        final_results = list()
+
+    # ZERO SHOT (only for chronos)
+    elif execution_mode=='zero_shot':
+
+        if train_first:
+            # train chronos before performing zero-shot
+            for _ in tqdm(range(n_datasets_train), desc='ChronosTSAD-training'):
+                data = generate_time_series(max_kernels, max_anomalies)
+                df = pd.DataFrame(data)
+
+                # split train and test
+                idx = int(len(df)*train_size)
+                train, test = df.iloc[:idx], df.iloc[idx:]
+                X_train, X_test, y_train, y_test = train['target'], test['target'], train['anomaly'], test['anomaly']
+
+                tsad.fit(torch.tensor(np.array(X_train)), torch.tensor(y_train))
+        else:
+            if not os.path.exists(model_dir):
+                raise ValueError('model dir not found')
+            
+            tsad.load(model_dir)
+
+
+        for _ in tqdm(range(n_datasets), desc='zero-shot'):
+            
+            for model_name, model in models.items():
+                
+                data = generate_time_series(max_kernels, max_anomalies)
+                df = pd.DataFrame(data)
+
+                # split train and test
+                idx = int(len(df)*train_size)
+                train, test = df.iloc[:idx], df.iloc[idx:]
+                X_train, X_test, y_train, y_test = train['target'], test['target'], train['anomaly'], test['anomaly']
+
+
+                if model_name!='ChronosTSAD':
+                    clf = model()
+
+
+                if model_name=='ChronosTSAD': # no fit for chronos
+                    y_pred = tsad.predict(torch.tensor(np.array(X_test)))
+                    results[model_name].add_results(y_test, y_pred)
+                else:
+                    clf.fit(np.array(X_train).reshape(-1,1), y_train)
+                    y_pred = clf.predict(np.array(X_test).reshape(-1,1))
+                    results[model_name].add_results(y_test, y_pred)
+        
+    else:
+        raise ValueError(f'Execution {execution_mode} not found in [in_context, zero_shot]')
+    
+
+    
+    # check to save the model
+    if execution_mode=='zero_shot' and save and train_first:
+        
+        if not os.path.exists(model_dir):
+            os.makedirs(model_dir, exist_ok=True)
+        
+        tsad.save(model_dir)
+    
+    # compute final results
+    final_results = list()
+
+    for model_name in models.keys():
+        final_results.append(results[model_name].compute_stats())
+    
+    flatten_metrics(final_results)
