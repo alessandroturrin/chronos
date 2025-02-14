@@ -214,10 +214,10 @@ if __name__=='__main__':
     for _, dataset in tqdm(enumerate(datasets), desc='dataset'):
 
         for _, model in tqdm(enumerate(models), desc='chronos model'):
-
+            
             # set-up for pipeline
             clf = ChronosTSClassifier.from_pretrained(
-                model_name,
+                model,
                 torch_dtype=torch.float32,
             )
             
@@ -239,6 +239,6 @@ if __name__=='__main__':
     final_results = list()
 
     for model_name in models:
-        final_results.append(results[model].compute_stats())
+        final_results.append(results[model_name].compute_stats())
     
     flatten_metrics(final_results)
