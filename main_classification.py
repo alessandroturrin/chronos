@@ -1,112 +1,33 @@
 # https://www.timeseriesclassification.com/dataset.php
 
 from typing import Union, List, Tuple, Any
-import os
+from tqdm import tqdm
 import random
+import joblib
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
 
 from argparse import ArgumentParser
 
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.svm import SVC
 
 from aeon.datasets import load_classification
-
 from chronos.chronos import ChronosPipeline, ChronosTokenizer, ChronosModel, ChronosConfig, AutoConfig, AutoModelForSeq2SeqLM, AutoModelForCausalLM
 
-
-class TimeSeriesDataset(Dataset):
-    def __init__(self, embeddings, labels):
-        self.embeddings = embeddings
-        self.labels = labels
-
-    def __len__(self):
-        return len(self.embeddings)
-
-    def __getitem__(self, idx):
-        return self.embeddings[idx], self.labels[idx]
-
-
-class TSConfig:
-    def __init__(self, 
-                 input_size: int = None,
-                 num_classes: int = None,
-                 fc1: int = 128,
-                 fc2: int = 64,
-                 dropout_prob: float = 0.5,
-                 negative_slope: float = 0.01) -> None:
-        
-        self.input_size = input_size
-        self.num_classes = num_classes
-        self.fc1 = fc1
-        self.fc2 = fc2
-        self.dropout_prob = dropout_prob
-        self.negative_slope = negative_slope
-
-    def add(self, input_size: int, num_classes: int = None):
-        self.input_size = input_size
-
-        if num_classes is not None:
-            self.num_classes = num_classes
-
-    def __repr__(self):
-        return f'TSConfig(input_size={self.input_size}, num_classes={self.num_classes}, fc1={self.fc1}, fc2={self.fc2}, dropout_prob={self.dropout_prob}, negative_slope={self.negative_slope})'
-
-
-class TSClassifier(nn.Module):
-    def __init__(self, 
-                 input_size: int, 
-                 num_classes: int, 
-                 fc1: int = 128, 
-                 fc2: int = 64, 
-                 dropout_prob: float = 0.5,
-                 negative_slope: float = 0.01) -> None:
-        
-        super(TSClassifier, self).__init__()
-
-        self.fc1 = nn.Linear(input_size, fc1)  
-        self.fc2 = nn.Linear(fc1, fc2)          
-        self.fc3 = nn.Linear(fc2, num_classes)
-        
-        self.batch_norm1 = nn.BatchNorm1d(fc1)
-        self.batch_norm2 = nn.BatchNorm1d(fc2)
-        
-        self.relu = nn.LeakyReLU(negative_slope=negative_slope)
-        self.dropout = nn.Dropout(dropout_prob)
-        
-        self.softmax = nn.Softmax(dim=1)
-
-    def forward(self, x):
-        x = self.batch_norm1(self.fc1(x)) 
-        x = self.relu(x)  
-        x = self.dropout(x)  
-        
-        x = self.batch_norm2(self.fc2(x))  
-        x = self.relu(x) 
-        x = self.dropout(x) 
-        
-        x = self.fc3(x)
-        return self.softmax(x)
-
+from ext.metrics import Metrics, flatten_metrics
 
 class ChronosTSClassifier(ChronosPipeline):
 
     tokenizer: ChronosTokenizer
     model: ChronosModel
-    classifier: TSClassifier
 
-    def __init__(self, tokenizer, model):
-        #super().__init__(inner_model=model.model)
+    def __init__(self, tokenizer, model, clf):
         self.tokenizer = tokenizer
         self.model = model
+        self.clf = clf
 
     @torch.no_grad()
     def embed(
@@ -127,56 +48,18 @@ class ChronosTSClassifier(ChronosPipeline):
         self,
         context: Union[torch.Tensor, List[torch.Tensor]],
         classes,
-        ts_config: TSConfig = None,
-        num_epochs: int = 25,
-        batch_size: int = 32,
-        lr: float = .001,
+        batch_size: int = 32
     ) -> None:
         
-        if TSConfig is None:
-            self.ts_config = TSConfig()
-        else:
-            self.ts_config = ts_config
+        embeddings = []
 
-        train_embeddings = self.embed(torch.tensor(context).view(context.shape[0], -1))[0]
-        train_embeddings = train_embeddings.view(train_embeddings.shape[0], -1)
-        train_dataset = TimeSeriesDataset(train_embeddings, torch.tensor(classes))
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        for i in range(0, len(context)):
+            row = context[i, :, :]
+            emb_batch = self.embed(row.clone().detach())[0][0]
 
-        input_size = train_embeddings.shape[1]
-        num_classes = len(torch.unique(torch.tensor(classes)))
-
-        self.ts_config.add(input_size, num_classes)
-        clf = TSClassifier(input_size, num_classes)
-
-        criterion = nn.CrossEntropyLoss()
-        optimizer = optim.Adam(clf.parameters(), lr=lr)
-
-        clf.train()
-        for epoch in range(num_epochs):
-            running_loss = 0.0
-            correct_predictions = 0
-            total_predictions = 0
-
-            for _, (embeddings, labels) in enumerate(train_loader):
-                optimizer.zero_grad()
-            
-                outputs = clf(embeddings)
-                loss = criterion(outputs, labels)
-                loss.backward()
-                optimizer.step()
-
-                running_loss += loss.item()
-                _, predicted = torch.max(outputs, 1)
-                correct_predictions += (predicted == labels).sum().item()
-                total_predictions += labels.size(0)
-
-            avg_loss = running_loss / len(train_loader)
-
-            print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
+            embeddings.append(emb_batch[0, :-1])
         
-        self.classifier = SVC(kernel='poly')
-        self.classifier.fit(train_embeddings, classes)
+        self.clf.fit(embeddings, classes)
 
     @torch.no_grad()
     def predict(
@@ -185,34 +68,24 @@ class ChronosTSClassifier(ChronosPipeline):
         batch_size: int = 32
     ) -> torch.Tensor:
         
+        embeddings = []
+
+        for i in range(0, len(context)):
+            row = context[i, :, :]
+            emb_batch = self.embed(row.clone().detach())[0][0]
+
+            embeddings.append(emb_batch[0, :-1])
         
-        embeddings, _ = self.embed(context.view(context.shape[0], -1))
+        predictions = self.clf.predict(embeddings)
 
-        embeddings = embeddings.view(embeddings.shape[0], -1)
-
-        return self.classifier.predict(embeddings)
-
-        test_dataset = TimeSeriesDataset(embeddings, [-1]*embeddings.shape[0])
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-        predictions = torch.empty(0, dtype=torch.long)
-        
-        with torch.no_grad():
-            for embeddings, _ in test_loader:
-                outputs = self.classifier(embeddings)
-                _, predicted = torch.max(outputs, 1)
-                predictions = torch.cat((predictions, predicted), dim=0)
-        
         return predictions
-
-    def save_model(self, output_path: str) -> None:
-
-        torch.save(self.classifier, f'{output_path}/ts_classifier.pth')
     
-    def load_model(self, input_path: str) -> None:
-
-        torch.load(f'{input_path}/ts_classifier.pth')
-
+    def load(self, path: str):
+        self.clf = joblib.load(path + '/chronos_tsad.pkl')
+    
+    def save(self, path: str):
+        joblib.dump(self.clf, path + '/chronos_tsad.pkl')
+    
     @classmethod
     def from_pretrained(cls, *args, **kwargs):
         '''
@@ -236,6 +109,7 @@ class ChronosTSClassifier(ChronosPipeline):
         return cls(
             tokenizer=chronos_config.create_tokenizer(),
             model=ChronosModel(config=chronos_config, model=inner_model),
+            clf = RandomForestClassifier()
         )
 
 
@@ -247,6 +121,7 @@ def set_seed(seed: int):
     torch.cuda.manual_seed(seed)
     torch.backends.cudnn.deterministic = True
 
+
 if __name__=='__main__':
 
     parser = ArgumentParser(description='Chronos Time Series Classifier')
@@ -255,7 +130,7 @@ if __name__=='__main__':
         '--model_name',
         help = 'chronos model',
         required = False,
-        default = 'amazon/chronos-t5-tiny',
+        default = 'ALL',
         choices = ['amazon/chronos-t5-tiny', 'amazon/chronos-t5-small', 'amazon/chronos-t5-base'],
         type = str
     )
@@ -264,8 +139,8 @@ if __name__=='__main__':
         '--dataset',
         help = 'select dataset',
         required = False,
-        default = 'GunPointAgeSpan',
-        choices = ['ACSF1', 'Coffee', 'Earthquakes', 'GunPointAgeSpan'],
+        default = 'Earthquakes',
+        choices = ['ACSF1', 'Earthquakes', 'Coffee', 'GunPointAgeSpan'],
         type = str
     )
 
@@ -279,75 +154,10 @@ if __name__=='__main__':
     )
 
     parser.add_argument(
-        '--modality',
-        help = 'modality of execution',
-        required = False,
-        default = 'train',
-        choices = ['train', 'test'],
-        type = str
-    )
-
-    parser.add_argument(
         '--seed',
         help = 'seed for reproducibility',
         required = False,
         default = None,
-        type = int
-    )
-
-    parser.add_argument(
-        '--lr',
-        help='learning rate',
-        required = False,
-        default = 1e-4,
-        type = float
-    )
-
-    parser.add_argument(
-        '--num_epochs',
-        help = 'number of epochs for training',
-        required = False,
-        default = 1,
-        type = int
-    )
-
-    parser.add_argument(
-        '--batch_size',
-        help = 'batch size',
-        required = False,
-        default = 32,
-        type = int
-    )
-
-    parser.add_argument(
-        '--fc1',
-        help = 'size of layer 1',
-        required = False,
-        default = 256,
-        type = int
-    )
-
-    parser.add_argument(
-        '--fc2',
-        help = 'size of layer 2',
-        required = False,
-        default = 128,
-        type = int
-    )
-
-    parser.add_argument(
-        '--dropout_prob',
-        help = 'dropout probability',
-        required = False,
-        default = 0.5,
-        type = float
-    )
-
-    parser.add_argument(
-        '--negative_slope',
-        help = 'negative slope',
-        required = False,
-        default = 0.01,
         type = int
     )
 
@@ -374,15 +184,7 @@ if __name__=='__main__':
     model_name: str = args.model_name
     dataset: str = args.dataset
     extract_path: str = args.extract_path
-    modality: str = args.modality
     seed: int = args.seed
-    lr: float = args.lr
-    num_epochs: int = args.num_epochs
-    batch_size: int = args.batch_size
-    fc1: int = args.fc1
-    fc2: int = args.fc2
-    dropout_prob: float = args.dropout_prob
-    negative_slope: float = args.negative_slope
     input_path: str = args.input_path
     output_path: str = args.output_path
 
@@ -392,46 +194,51 @@ if __name__=='__main__':
     if seed is not None:
         set_seed(seed=seed)
 
-    # set-up for pipeline
-    clf = ChronosTSClassifier.from_pretrained(
-        model_name,
-        torch_dtype=torch.float32,
-    )
+    if dataset=='ALL':
+        datasets = ['ACSF1', 'Earthquakes', 'Coffee', 'GunPointAgeSpan']
+    else:
+        datasets = [dataset]
 
-    if modality=='train':
-        
-        if output_path is not None:
-            os.makedirs(output_path, exist_ok=True)
+    if model_name=='ALL':
+        models = ['amazon/chronos-t5-tiny', 'amazon/chronos-t5-small', 'amazon/chronos-t5-base']
+    else:
+        models = [model_name]
 
-        # TS config for classifier
-        ts_config = TSConfig(
-            fc1 = fc1,
-            fc2 = fc2,
-            dropout_prob = dropout_prob,
-            negative_slope = negative_slope
-        )
-        
-        X_train, y_train = load_classification(dataset, extract_path=extract_path, split='train', return_metadata=False)
-        X_test, y_test = load_classification(dataset, extract_path=extract_path, split='test', return_metadata=False)
+    # init results
+    results = dict()
 
-        label_encoder = LabelEncoder()
-        
-        y_train = label_encoder.fit_transform(y_train)
-        y_test = label_encoder.transform(y_test)
+    for model_name in models:
+        results[model_name] = Metrics(model_name)
 
-        clf.fit(X_train, y_train, ts_config, num_epochs, batch_size, lr)
 
-        y_pred = clf.predict(torch.tensor(X_test))
+    for _, dataset in tqdm(enumerate(datasets), desc='dataset'):
 
-        print(accuracy_score(y_test, y_pred))
+        for _, model in tqdm(enumerate(models), desc='chronos model'):
 
-        clf_2 = SVC()
-        clf_2.fit(X_train.reshape(X_train.shape[0], -1), y_train)
-        y_pred_2 = clf_2.predict(X_test.reshape(X_test.shape[0], -1))
-        print(accuracy_score(y_test, y_pred_2))
+            # set-up for pipeline
+            clf = ChronosTSClassifier.from_pretrained(
+                model_name,
+                torch_dtype=torch.float32,
+            )
+            
+            X_train, y_train = load_classification(dataset, extract_path=extract_path, split='train', return_metadata=False)
+            X_test, y_test = load_classification(dataset, extract_path=extract_path, split='test', return_metadata=False)
 
-        if output_path is not None:
-            clf.save_model(output_path)
+            label_encoder = LabelEncoder()
+            
+            y_train = label_encoder.fit_transform(y_train)
+            y_test = label_encoder.transform(y_test)
+
+            clf.fit(torch.tensor(X_train), y_train)
+
+            y_pred = clf.predict(torch.tensor(X_test))
+
+            results[model].add_results(y_test, y_pred)
+
+
+    final_results = list()
+
+    for model_name in models:
+        final_results.append(results[model].compute_stats())
     
-    elif modality=='test':
-        pass
+    flatten_metrics(final_results)
