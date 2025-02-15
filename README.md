@@ -13,3 +13,5 @@ Three main files are provided in this repository:
 * main_stack.py: to execute ChronosStack
 * main_classification.py: to execute ChronosTSClassifier
 * main_anomaly.py: to execute ChronosTSAD
+
+The folder 'ext' contains some utilities, while 'chronos' contains the original code from Amazon.
