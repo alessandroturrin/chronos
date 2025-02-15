@@ -195,7 +195,7 @@ if __name__=='__main__':
         '--dataset',
         help = 'select dataset(s) from available ones',
         required = False,
-        default = ALL_DATASETS,
+        default = ['property_sales', 'netflix', 'weather', 'usd', 'bitcoin'],
         choices = ALL_DATASETS,
         type = str,
         nargs='+'

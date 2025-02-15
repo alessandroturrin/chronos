@@ -1,6 +1,5 @@
 from typing import Union, List, Tuple, Any
 from argparse import ArgumentParser
-import os
 
 import numpy as np
 import pandas as pd
@@ -8,10 +7,6 @@ from tqdm import tqdm
 
 import joblib
 import torch
-
-#from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier, IsolationForest
-from sklearn.preprocessing import MinMaxScaler
 
 from ext.anomaly_datasets import generate_time_series
 from ext.metrics import Metrics, flatten_metrics
