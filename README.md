@@ -1,4 +1,5 @@
-# DNLP
+# Beyond Chronos: Zero-Shot Transfer Learning Approaches and Covariate Adaptation
+Approaches and Covariate Adaptation
 The goal of this project is to analyze the potential applications of Chronos, a framework for pretrained probabilistic time series models proposed by Amazon.
 We introduce three main variations that efficiently work using Chronos in zero-shot prompting:
 * ChronosStack: a stack learner that combines Chronos with LightGBM to include the possibility of handling covariates.
