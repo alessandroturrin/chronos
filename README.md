@@ -8,3 +8,8 @@ We introduce three main variations that efficiently work using Chronos in zero-s
 You can find the source code and paper from Amazon below:
 * [paper](https://arxiv.org/pdf/2403.07815)
 * [code](https://github.com/amazon-science/chronos-forecasting)
+
+Three main files are provided in this repository:
+* main_stack.py: to execute ChronosStack
+* main_classification.py: to execute ChronosTSClassifier
+* main_anomaly.py: to execute ChronosTSAD
